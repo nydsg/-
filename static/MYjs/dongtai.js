@@ -373,7 +373,7 @@ function renderDynamicItem(d) {
     
     let imageHtml = '';
     if (d.image_url) {
-        imageHtml = `<img class="dynamic-image" src="${escapeHtml(d.image_url)}" alt="动态图片" onclick="event.stopPropagation();window.open('${escapeHtml(d.image_url)}')">`;
+        imageHtml = `<img class="dynamic-image" src="${escapeHtml(safeUrl(d.image_url))}" alt="动态图片" data-image-url="${escapeHtml(d.image_url)}" onclick="event.stopPropagation();window.open(this.dataset.imageUrl)">`;
     }
     
     return `
@@ -393,10 +393,20 @@ function renderDynamicItem(d) {
 
 // ========== 工具函数 ==========
 function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    if (text === null || text === undefined) return '';
+    return String(text).replace(/[&<>"']/g, function(m) {
+        if (m === '&') return '&amp;';
+        if (m === '<') return '&lt;';
+        if (m === '>') return '&gt;';
+        if (m === '"') return '&quot;';
+        return '&#39;';
+    });
+}
+
+// 仅允许站内路径或 http(s) 链接，阻止 javascript: 等危险协议
+function safeUrl(url) {
+    if (!url) return '';
+    return /^(https?:\/\/|\/)/i.test(String(url)) ? String(url) : '';
 }
 
 function formatTime(timeStr) {

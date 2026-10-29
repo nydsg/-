@@ -98,7 +98,7 @@ function renderTopTwoVideos() {
     topTwoVideos.innerHTML = `
         <div class="video-card" onclick="goPlay(${topVideos[0].id})">
             <div class="cover-box">
-                < img class="video-cover" src="${topVideos[0].cover_path}">
+                <img class="video-cover" src="${topVideos[0].cover_path}">
                 <div class="video-time">${formatTime(topVideos[0].duration)}</div>
             </div>
             <div class="video-info">
@@ -109,7 +109,7 @@ function renderTopTwoVideos() {
         </div>
         <div class="video-card" onclick="goPlay(${topVideos[1].id})">
             <div class="cover-box">
-                < img class="video-cover" src="${topVideos[1].cover_path}">
+                <img class="video-cover" src="${topVideos[1].cover_path}">
                 <div class="video-time">${formatTime(topVideos[1].duration)}</div>
             </div>
             <div class="video-info">
@@ -138,7 +138,7 @@ function renderCarouselImages() {
 function createCardHtml(v) {
     return `
         <div class="cover-box">
-            < img class="video-cover" src="${v.cover_path}" loading="lazy">
+            <img class="video-cover" src="${v.cover_path}" loading="lazy">
             <div class="video-time">${formatTime(v.duration)}</div>
         </div>
         <div class="video-info">

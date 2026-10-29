@@ -188,13 +188,20 @@ function formatViews(views) {
 }
 
 function escapeHtml(str) {
-    if (!str) return '';
-    return str.replace(/[&<>]/g, function(m) {
+    if (str === null || str === undefined) return '';
+    return String(str).replace(/[&<>"']/g, function(m) {
         if (m === '&') return '&amp;';
         if (m === '<') return '&lt;';
         if (m === '>') return '&gt;';
-        return m;
+        if (m === '"') return '&quot;';
+        return '&#39;';
     });
+}
+
+// 仅允许站内路径或 http(s) 链接，阻止 javascript: 等危险协议
+function safeUrl(url) {
+    if (!url) return '';
+    return /^(https?:\/\/|\/)/i.test(String(url)) ? String(url) : '';
 }
 
 // ==================== 创建视频卡片 ====================
@@ -207,7 +214,7 @@ function createVideoCard(video) {
     const author = video.author_name || video.author || video.username || '未知作者';
     const views = formatViews(video.view_count || video.views || 0);
     card.innerHTML = `
-        <img class="video-cover" src="${coverUrl}" alt="${escapeHtml(title)}" 
+        <img class="video-cover" src="${escapeHtml(safeUrl(coverUrl))}" alt="${escapeHtml(title)}" 
              onerror="this.src='/static/images/default-cover.jpg'">
         <div class="video-info">
             <div class="video-title">${escapeHtml(title)}</div>
@@ -254,7 +261,7 @@ async function loadFavorites() {
                     card.style.cursor = 'pointer';
                     card.innerHTML = `
                         <img class="fav-cover" 
-                             src="${coverUrl}" 
+                             src="${escapeHtml(safeUrl(coverUrl))}" 
                              alt="${escapeHtml(folder.name)}"
                              onerror="this.onerror=null;this.src='/static/images/default-fav1.jpg'">
                         <div class="fav-info">
@@ -361,17 +368,17 @@ async function loadBgImageList() {
     div.style.cursor = 'pointer';
 
     div.innerHTML = `
-      <img src="${item.url}" style="width:100%;height:100px;object-fit:cover;display:block;"
+      <img src="${escapeHtml(safeUrl(item.url))}" style="width:100%;height:100px;object-fit:cover;display:block;"
            onerror="this.parentElement.style.display='none'">
       
       <div style="position:absolute;bottom:0;left:0;right:0;">
-        <select data-url="${item.url}" class="folder-select" 
+        <select data-url="${escapeHtml(safeUrl(item.url))}" class="folder-select" 
                 style="width:100%;padding:5px;font-size:12px;border:none;background:#f0f0f0;cursor:pointer;">
           <option value="">设为哪个收藏夹背景</option>
           ${folderOptions}
         </select>
       </div>
-      <div data-image-id="${item.id}" data-filename="${item.name}" class="del-bg-btn" 
+      <div data-image-id="${item.id}" data-filename="${escapeHtml(item.name)}" class="del-bg-btn" 
            style="position:absolute;top:4px;right:4px;background:red;color:white;width:24px;height:24px;display:flex;align-items:center;justify-content:center;font-size:14px;border-radius:4px;cursor:pointer;">
         ×
       </div>
@@ -520,8 +527,8 @@ function renderFollowList(container, users) {
     users.forEach(user => {
         const avatar = user.touxiang_url || '';
         const avatarHtml = avatar 
-            ? `<img class="follow-avatar" src="${avatar}" alt="">` 
-            : `<div class="follow-avatar" style="background:linear-gradient(135deg,#667eea,#764ba2);color:white;display:flex;align-items:center;justify-content:center;">${user.name?.[0] || '?'}</div>`;
+            ? `<img class="follow-avatar" src="${escapeHtml(safeUrl(avatar))}" alt="">` 
+            : `<div class="follow-avatar" style="background:linear-gradient(135deg,#667eea,#764ba2);color:white;display:flex;align-items:center;justify-content:center;">${escapeHtml(user.name?.[0] || '?')}</div>`;
         
         const isFollowing = user.is_following;
         const btnText = isFollowing ? '已关注' : '关注';

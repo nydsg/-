@@ -34,8 +34,7 @@ def vitalframe(video_path,save_folder):
     video.release()
     # print(f"[调试] 抓到最佳帧了吗？: {last_frame}")
     if last_frame is not None:
-      # folder=rf"E:\项目\xiangmu\uploads\{filename}"
-      # os.makedirs(folder,exist_ok=True)
+       # 目录由调用方传入（config 里的 uploads 目录），这里不再写死路径
        vital_path = os.path.join(save_folder, "vitalframe.jpg")
        img_rgb = cv2.cvtColor(last_frame, cv2.COLOR_BGR2RGB)
        PIL.Image.fromarray(img_rgb).save(vital_path)#PIL.Image → 用专业图片库.fromarray(img_rgb) → 把内存里的画面变成真正图片

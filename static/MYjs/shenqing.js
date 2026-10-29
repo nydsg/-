@@ -7,8 +7,9 @@ async function applyShenheyuan() {
     resultDiv.innerHTML = '';
     
     try {
-        const response = await fetch('/shenheyuan');
-        const data = await response.json();  // 即使是 403，也要解析 JSON
+        // 安全修复：/shenheyuan 会写入审核员表，后端已改为只接受 POST（防止 GET 型 CSRF）
+        const response = await fetch('/shenheyuan', { method: 'POST' });
+        const data = await response.json();  // 即使是 401/403，也要解析 JSON
         
         if (data.status === 'success') {
             resultDiv.innerHTML = `<p style="color: green;">✅ ${data.message}</p>`;

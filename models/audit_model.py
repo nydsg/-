@@ -237,7 +237,10 @@ class VideoAuditor:
         """初始化审核器"""
         # 初始化综合视频内容审核器
         self.content_auditor = VideoContentAuditor()
-        logger.info("视频审核器初始化完成")
+        # 只有 CLIP / EasyOCR 至少有一个真的加载成功，才算"能审"。
+        # 否则上层会把 AI 通道判定为不可用，让投稿走人工审核，而不是用兜底分误判。
+        self.ready = bool(getattr(self.content_auditor, 'available', False))
+        logger.info(f"视频审核器初始化完成（模型就绪={self.ready}）")
     
     def audit_video(self, frames, filename):
         """

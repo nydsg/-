@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-surface-page text-ink antialiased;
+    font-family: 'Segoe UI', Roboto, 'Helvetica Neue', 'PingFang SC',
+      'Microsoft YaHei', sans-serif;
+  }
+  ::selection {
+    @apply bg-brand-200 text-brand-900;
+  }
+  /* 细滚动条，贴合原版的轻量感 */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-ink-line;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-ink-mute/60;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-card border border-ink-line/70 bg-white shadow-card;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-pill px-4 py-2
+           text-sm font-medium transition-all duration-150 disabled:cursor-not-allowed
+           disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-brand-500 text-white hover:bg-brand-600 active:scale-[0.98];
+  }
+  .btn-ghost {
+    @apply btn border border-ink-line bg-white text-ink-soft hover:border-brand-300
+           hover:text-brand-600;
+  }
+  .btn-soft {
+    @apply btn bg-brand-50 text-brand-600 hover:bg-brand-100;
+  }
+  .input {
+    @apply w-full rounded-lg border border-ink-line bg-white px-3 py-2 text-sm
+           text-ink placeholder:text-ink-mute outline-none transition
+           focus:border-brand-400 focus:ring-2 focus:ring-brand-100;
+  }
+  .chip {
+    @apply inline-flex items-center rounded-pill bg-surface-subtle px-2.5 py-1
+           text-xs text-ink-soft;
+  }
+  .chip-brand {
+    @apply inline-flex items-center rounded-pill bg-brand-50 px-2.5 py-1
+           text-xs font-medium text-brand-600;
+  }
+  .skeleton {
+    @apply relative overflow-hidden rounded-lg bg-surface-subtle;
+  }
+  .skeleton::after {
+    content: '';
+    @apply absolute inset-0 animate-shimmer;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      rgba(255, 255, 255, 0.65),
+      transparent
+    );
+    transform: translateX(-100%);
+  }
+}
+
+/* 流式输出的光标 */
+.typing-caret::after {
+  content: '▍';
+  @apply ml-0.5 text-brand-500;
+  animation: caret 1s steps(2) infinite;
+}
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}

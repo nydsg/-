@@ -18,7 +18,7 @@ function renderVideoList() {
         cardsHtml += `
             <div class="side-video-card ${isActive}" data-video-id="${video.id}">
                 <div class="side-thumb">
-                    <img src="${coverUrl}" alt="${video.title}" width="120" height="68" 
+                    <img src="${escapeHtml(safeUrl(coverUrl))}" alt="${escapeHtml(video.title)}" width="120" height="68" 
                          style="object-fit: cover;" 
                          onerror="this.onerror=null;this.src='/static/images/default-cover.jpg'">
                 </div>
@@ -83,13 +83,19 @@ function formatTime(isoString) {
 
 function escapeHtml(str) {
     if (str === null || str === undefined) return '';
-    str = String(str); 
-    return str.replace(/[&<>]/g, function(m) {
+    return String(str).replace(/[&<>"']/g, function(m) {
         if (m === '&') return '&amp;';
         if (m === '<') return '&lt;';
         if (m === '>') return '&gt;';
-        return m;
+        if (m === '"') return '&quot;';
+        return '&#39;';
     });
+}
+
+// 仅允许站内路径或 http(s) 链接，阻止 javascript: 等危险协议
+function safeUrl(url) {
+    if (!url) return '';
+    return /^(https?:\/\/|\/)/i.test(String(url)) ? String(url) : '';
 }
 
 // ==================== 事件绑定 ====================

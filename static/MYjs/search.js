@@ -59,6 +59,24 @@ async function loadSearchResults(query) {
     }
 }
 
+// HTML转义（防XSS）
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str).replace(/[&<>"']/g, function(m) {
+        if (m === '&') return '&amp;';
+        if (m === '<') return '&lt;';
+        if (m === '>') return '&gt;';
+        if (m === '"') return '&quot;';
+        return '&#39;';
+    });
+}
+
+// 仅允许站内路径或 http(s) 链接，阻止 javascript: 等危险协议
+function safeUrl(url) {
+    if (!url) return '';
+    return /^(https?:\/\/|\/)/i.test(String(url)) ? String(url) : '';
+}
+
 // 显示结果
 function displayResults(results) {
     const resultList = document.getElementById('resultList');
@@ -78,7 +96,7 @@ function displayResults(results) {
         return `
             <div class="result-item" onclick="playVideo(${v.id})">
                 <div class="result-cover">
-                    <img src="${v.cover_path || ''}" alt="">
+                    <img src="${escapeHtml(safeUrl(v.cover_path))}" alt="">
                 </div>
                 <div class="result-info">
                     <div class="result-title">${highlightKeyword(v.zuopin_name, document.getElementById('searchQuery').textContent)}</div>
@@ -87,7 +105,7 @@ function displayResults(results) {
                         <span>观看 ${v.view_count || 0}</span>
                     </div>
                     <div class="result-tags">
-                        ${tags.slice(0, 3).map(t => '<span class="result-tag">' + t.trim() + '</span>').join('')}
+                        ${tags.slice(0, 3).map(t => '<span class="result-tag">' + escapeHtml(String(t).trim()) + '</span>').join('')}
                     </div>
                 </div>
             </div>
@@ -97,9 +115,13 @@ function displayResults(results) {
 
 // 关键词高亮
 function highlightKeyword(text, keyword) {
-    if (!keyword || !text) return text;
-    const regex = new RegExp('(' + keyword + ')', 'gi');
-    return text.replace(regex, '<em style="color: #f00; font-style: normal;">$1</em>');
+    if (!keyword || !text) return escapeHtml(text);
+    const safeText = escapeHtml(text);
+    // 修复：关键词直接拼进 RegExp，输入 ( [ * ? 等字符会抛 SyntaxError 让搜索页白屏，
+    // 这里先把正则元字符转义（注意：在已 HTML 转义的文本上匹配，所以只做正则转义）。
+    const escaped = String(keyword).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp('(' + escaped + ')', 'gi');
+    return safeText.replace(regex, '<em style="color: #f00; font-style: normal;">$1</em>');
 }
 
 // 播放视频

@@ -1,5 +1,17 @@
 let selectedFile = null;
 
+// HTML转义（防XSS）
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str).replace(/[&<>"']/g, function(m) {
+        if (m === '&') return '&amp;';
+        if (m === '<') return '&lt;';
+        if (m === '>') return '&gt;';
+        if (m === '"') return '&quot;';
+        return '&#39;';
+    });
+}
+
         // 文件选择
         document.getElementById('videoInput').addEventListener('change', function(e) {
             const file = e.target.files[0];
@@ -7,7 +19,7 @@ let selectedFile = null;
                 selectedFile = file;
                 const fileInfo = document.getElementById('fileInfo');
                 fileInfo.style.display = 'block';
-                fileInfo.innerHTML = `📄 已选择: ${file.name}<br>📏 大小: ${(file.size / 1024 / 1024).toFixed(2)} MB`;
+                fileInfo.innerHTML = `📄 已选择: ${escapeHtml(file.name)}<br>📏 大小: ${(file.size / 1024 / 1024).toFixed(2)} MB`;
                 document.getElementById('auditBtn').disabled = false;
             }
         });
@@ -41,7 +53,7 @@ let selectedFile = null;
                 const data = await response.json();
                 
                 if (data.error) {
-                    resultDiv.innerHTML = `<div style="color:red">❌ 评审失败: ${data.error}</div>`;
+                    resultDiv.innerHTML = `<div style="color:red">❌ 评审失败: ${escapeHtml(data.error)}</div>`;
                     resultDiv.className = 'result-area result-fail';
                     return;
                 }
@@ -49,7 +61,7 @@ let selectedFile = null;
                 displayAuditResult(data);
                 
             } catch (error) {
-                resultDiv.innerHTML = `<div style="color:red">❌ 网络错误: ${error.message}</div>`;
+                resultDiv.innerHTML = `<div style="color:red">❌ 网络错误: ${escapeHtml(error.message)}</div>`;
                 resultDiv.className = 'result-area result-fail';
             } finally {
                 auditBtn.disabled = false;
@@ -77,13 +89,13 @@ let selectedFile = null;
             // 创意类型标签
             let typeBadge = '';
             if (data.content_type) {
-                typeBadge = `<div style="margin: 10px 0"><strong>📁 作品类型：</strong><span class="badge" style="background:#667eea; color:white; padding:4px 12px; border-radius:20px">${data.content_type}</span></div>`;
+                typeBadge = `<div style="margin: 10px 0"><strong>📁 作品类型：</strong><span class="badge" style="background:#667eea; color:white; padding:4px 12px; border-radius:20px">${escapeHtml(data.content_type)}</span></div>`;
             }
             
             // 内容标签
             let tagsHtml = '';
             if (data.tags && data.tags.length > 0) {
-                tagsHtml = `<div style="margin: 10px 0"><strong>🏷️ 作品标签：</strong> ${data.tags.map(t => `<span style="background:#e9ecef; padding:4px 10px; border-radius:20px; margin-right:8px; font-size:12px">#${t}</span>`).join('')}</div>`;
+                tagsHtml = `<div style="margin: 10px 0"><strong>🏷️ 作品标签：</strong> ${data.tags.map(t => `<span style="background:#e9ecef; padding:4px 10px; border-radius:20px; margin-right:8px; font-size:12px">#${escapeHtml(t)}</span>`).join('')}</div>`;
             }
             
             // 改进建议
@@ -93,7 +105,7 @@ let selectedFile = null;
                     <div style="margin-top: 15px; background: #fff3cd; padding: 12px; border-radius: 10px;">
                         <strong>💡 创意提升建议：</strong>
                         <ul style="margin: 8px 0 0 20px;">
-                            ${data.suggestions.map(s => `<li style="margin: 5px 0">${s}</li>`).join('')}
+                            ${data.suggestions.map(s => `<li style="margin: 5px 0">${escapeHtml(s)}</li>`).join('')}
                         </ul>
                     </div>
                 `;
@@ -108,7 +120,7 @@ let selectedFile = null;
                     framesHtml += `
                         <div class="frame-item">
                             <span>📸 片段 ${f.frame}</span>
-                            <span>${emoji} ${f.analysis}</span>
+                            <span>${emoji} ${escapeHtml(f.analysis)}</span>
                         </div>
                     `;
                 });
@@ -136,7 +148,7 @@ let selectedFile = null;
                 
                 <div style="margin: 15px 0; padding: 12px; background: #e8f4fd; border-radius: 10px;">
                     <strong>📢 评审意见</strong>
-                    <p style="margin-top: 8px; line-height: 1.5;">${data.message}</p>
+                    <p style="margin-top: 8px; line-height: 1.5;">${escapeHtml(data.message)}</p>
                 </div>
                 
                 ${typeBadge}
@@ -185,7 +197,7 @@ async function loadAuditRecords() {
             const icon = isPending ? '⏳' : '❌';
             const text = isPending ? '审核中' : '未通过';
             const statusClass = isPending ? 'status-pending' : 'status-rejected';
-            const reason = !isPending && r.reason ? `<span class="status-reason">${r.reason}</span>` : '';
+            const reason = !isPending && r.reason ? `<span class="status-reason">${escapeHtml(r.reason)}</span>` : '';
             
             html += `
                 <div class="status-item ${statusClass}">

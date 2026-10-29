@@ -140,7 +140,7 @@ function renderWorks() {
         
         html += `
             <div class="work-card" ${onClick} style="${cursorStyle}">
-                <img class="work-cover" src="${escapeHtml(work.cover)}" alt="${escapeHtml(work.title)}" 
+                <img class="work-cover" src="${escapeHtml(safeUrl(work.cover))}" alt="${escapeHtml(work.title)}" 
                      onerror="this.src='/static/images/default-cover.jpg'">
                 <div class="work-actions">
                     ${actionsHtml}
@@ -243,13 +243,20 @@ async function confirmReject(workId) {
 
 // ==================== 工具函数 ====================
 function escapeHtml(str) {
-    if (!str) return '';
-    return String(str).replace(/[&<>]/g, function(m) {
+    if (str === null || str === undefined) return '';
+    return String(str).replace(/[&<>"']/g, function(m) {
         if (m === '&') return '&amp;';
         if (m === '<') return '&lt;';
         if (m === '>') return '&gt;';
-        return m;
+        if (m === '"') return '&quot;';
+        return '&#39;';
     });
+}
+
+// 仅允许站内路径或 http(s) 链接，阻止 javascript: 等危险协议
+function safeUrl(url) {
+    if (!url) return '';
+    return /^(https?:\/\/|\/)/i.test(String(url)) ? String(url) : '';
 }
 
 // ==================== 绑定标签切换 ====================

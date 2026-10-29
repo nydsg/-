@@ -36,7 +36,7 @@ function createVideoCard(video) {
     
     card.innerHTML = `
         <div class="video-cover-wrapper">
-            <img class="video-cover" src="${coverUrl}" alt="${escapeHtml(title)}" 
+            <img class="video-cover" src="${escapeHtml(safeUrl(coverUrl))}" alt="${escapeHtml(title)}" 
                  onerror="this.src='/static/images/default-cover.jpg'">
         </div>
         <div class="video-info">
@@ -66,13 +66,20 @@ function formatViews(views) {
 }
 
 function escapeHtml(str) {
-    if (!str) return '';
-    return str.replace(/[&<>]/g, function(m) {
+    if (str === null || str === undefined) return '';
+    return String(str).replace(/[&<>"']/g, function(m) {
         if (m === '&') return '&amp;';
         if (m === '<') return '&lt;';
         if (m === '>') return '&gt;';
-        return m;
+        if (m === '"') return '&quot;';
+        return '&#39;';
     });
+}
+
+// 仅允许站内路径或 http(s) 链接，阻止 javascript: 等危险协议
+function safeUrl(url) {
+    if (!url) return '';
+    return /^(https?:\/\/|\/)/i.test(String(url)) ? String(url) : '';
 }
 
 // ==================== 加载点赞视频 ====================

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>500 · 服务器错误</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      background: #0f1116; color: #e6e8ef;
+      font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    .card {
+      max-width: 560px; padding: 48px 40px; text-align: center;
+      background: #171a22; border: 1px solid #262b36; border-radius: 16px;
+    }
+    .code { font-size: 72px; font-weight: 700; letter-spacing: 4px; color: #ff6b6b; line-height: 1; }
+    h1 { font-size: 20px; font-weight: 600; margin: 20px 0 8px; }
+    p { color: #8b93a7; font-size: 14px; line-height: 1.7; margin: 0 0 8px; }
+    ul { text-align: left; color: #8b93a7; font-size: 13px; line-height: 1.9; margin: 0 0 28px; padding-left: 20px; }
+    code { color: #b9c2d8; }
+    a {
+      display: inline-block; padding: 10px 22px; border-radius: 10px;
+      background: #4c7dff; color: #fff; text-decoration: none; font-size: 14px;
+    }
+    a:hover { background: #3b69e0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="code">500</div>
+    <h1>服务器内部错误</h1>
+    <p>这一页没能正常渲染。可以先试这两步：</p>
+    <ul>
+      <li>刷新一次页面</li>
+      <li>打开 <code>/healthz</code> 看看数据库是否可用</li>
+    </ul>
+    <a href="/index">返回首页</a>
+  </div>
+</body>
+</html>

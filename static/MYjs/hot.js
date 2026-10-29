@@ -7,8 +7,13 @@ const gengduoBtn = document.getElementById('gengduoBtn');
 // HTML转义（防XSS）
 function escapeHtml(str) {
     if (str === null || str === undefined) return '';
-    str = String(str);
-    return str.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
+    return String(str).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+}
+
+// 仅允许站内路径或 http(s) 链接，阻止 javascript: 等危险协议
+function safeUrl(url) {
+    if (!url) return '';
+    return /^(https?:\/\/|\/)/i.test(String(url)) ? String(url) : '';
 }
 
 // 格式化数字
@@ -32,7 +37,7 @@ function createCardHtml(v) {
     
     return `
     <div class="cover-box">
-        <img class="video-cover" src="${coverPath}" alt="${escapeHtml(title)}" loading="lazy">
+        <img class="video-cover" src="${escapeHtml(safeUrl(coverPath))}" alt="${escapeHtml(title)}" loading="lazy">
     </div>
     <div class="video-info">
         <div class="video-title">${escapeHtml(title)}</div>

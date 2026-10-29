@@ -3,17 +3,33 @@ import pymysql
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 import os
+import re
+import time
 import uuid
 import shutil
 import logging
+import secrets
 from datetime import datetime
+from functools import wraps
+from urllib.parse import quote_plus
 from flask import send_from_directory
 # 导入配置
-from config import DevelopmentConfig
+from config import DevelopmentConfig, ensure_dirs
 
 # 导入AI模块
 from models import VideoAuditor, Recommender
 from utils import extract_frames, save_uploaded_video, delete_video, StreamPusher,vitalframe
+
+# ===== 启动兼容性修复 =====
+# Windows 控制台默认 GBK，而下面的启动日志含 ✅/⚠️ 等字符，print 会抛 UnicodeEncodeError，
+# 且它发生在 try/except 内部，会把「AI 模块初始化」的异常处理也一起打断，导致导入即失败。
+# 先把标准输出切到 UTF-8 容错模式，保证 `python zhanshizhan.py` 能正常启动。
+try:
+    import sys as _sys
+    _sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    _sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
 
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 app.config.from_object(DevelopmentConfig)
@@ -22,16 +38,30 @@ app.secret_key = app.config['SECRET_KEY']
 app.config['SESSION_PERMANENT']=True
 app.config['SESSION_TYPE']='filesystem'
 app.config['PERMANENT_SESSION_LIFETIME']=3600*24*7
+# ===== 安全加固：会话 Cookie 属性 =====
+# SameSite=Lax 让浏览器在跨站 POST 请求中不携带会话 Cookie，是抵御 CSRF 的第一道防线
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+# 站点启用 HTTPS 后把 SESSION_COOKIE_SECURE 设为 1（或用环境变量），让 Cookie 只在加密链路传输
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('SESSION_COOKIE_SECURE', '0') == '1'
 # 上传配置
 app.config['UPLOAD_FOLDER'] = app.config.get('UPLOAD_FOLDER', 'uploads')
 app.config['MAX_CONTENT_LENGTH'] = app.config.get('MAX_CONTENT_LENGTH', 500 * 1024 * 1024)
 
 # 创建上传文件夹
+ensure_dirs()      # 建好 uploads / NOAIuploads / avatars / backgrounds / dynamics 等目录
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # 数据库配置
-app.config['SQLALCHEMY_DATABASE_URI'] = app.config.get('SQLALCHEMY_DATABASE_URI', 
-    'mysql+pymysql://root:%40Love3344521%40@localhost/userdb')
+# 安全修复：不再在这里重复一份带明文口令的连接串；直接取 config.py 里由 DB_CONFIG 派生的 URI
+if not app.config.get('SQLALCHEMY_DATABASE_URI'):
+    _dbc = app.config.get('DB_CONFIG') or {}
+    app.config['SQLALCHEMY_DATABASE_URI'] = (
+        f"mysql+pymysql://{_dbc.get('user', 'root')}:"
+        f"{quote_plus(str(_dbc.get('password', '')))}"
+        f"@{_dbc.get('host', 'localhost')}:{_dbc.get('port', 3306)}"
+        f"/{_dbc.get('database', 'userdb')}"
+    )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 # 日志配置
@@ -40,17 +70,35 @@ logger = logging.getLogger(__name__)
 
 #"""从数据库加载视频到推荐器"""
 def load_videos_to_recommender():
+    """从数据库加载视频到推荐器。
+
+    修复：原实现只要数据库或推荐器任一不可用，就会在**导入期**抛 AttributeError，
+    导致整个网站起不来（数据库没起来 → 网站也起不来）。现在改为跳过并告警。
+    """
+    if recommender is None:
+        print("⚠️ 推荐系统未初始化，跳过视频库加载（搜索将降级为 SQL LIKE）")
+        return
     conn = get_db()
-    cursor = conn.cursor(pymysql.cursors.DictCursor)
-    cursor.execute('''
-        SELECT id, zuopin_name, tags, view_count, cover_path, zuopin_url,username
-        FROM video_records
-    ''')
-    videos = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    recommender.update_library(videos)
-    print(f"推荐器加载了 {len(videos)} 个视频")
+    if not conn:
+        print("⚠️ 数据库不可用，跳过视频库加载（稍后可重启服务重建索引）")
+        return
+    try:
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute('''
+            SELECT id, zuopin_name, tags, view_count, cover_path, zuopin_url, username
+            FROM video_records
+        ''')
+        videos = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        recommender.update_library(videos)
+        print(f"推荐器加载了 {len(videos)} 个视频")
+    except Exception as e:
+        print(f"⚠️ 推荐器加载失败（不影响主服务）: {e}")
+        try:
+            conn.close()
+        except Exception:
+            pass
 # 初始化AI模块 
 print("=" * 50)
 print("正在初始化AI模块...")
@@ -58,7 +106,13 @@ print("=" * 50)
 
 try:
     video_auditor = VideoAuditor()
-    print("✅ 视频审核模块初始化成功")
+    # 修复：模型没加载成功时 object 依然能构造出来，若直接当成"可用"，
+    # 会用兜底分把每一次投稿都判成"审核不通过"。这里显式判定就绪状态。
+    if not getattr(video_auditor, 'ready', True):
+        print("⚠️ AI 模型未就绪（缺 CLIP / EasyOCR 依赖），AI 审核通道将降级为人工审核")
+        video_auditor = None
+    else:
+        print("✅ 视频审核模块初始化成功")
 except Exception as e:
     print(f"⚠️ 视频审核模块初始化失败: {e}")
     video_auditor = None
@@ -100,24 +154,183 @@ class VideoRecord(db.Model):
 
 # ============= 数据库函数 =============
 def get_db():
+    # 安全修复：口令只保留在 config.py 一处（支持环境变量），此处不再重复硬编码
+    db_conf = app.config.get('DB_CONFIG')
+    if not db_conf:
+        logger.error("数据库配置缺失：请检查 config.py 的 DB_CONFIG")
+        return None
+    if not db_conf.get('password'):
+        logger.error("数据库口令未配置：请设置环境变量 DB_PASSWORD，"
+                     "或在项目根目录创建 .db_password 文件")
+        return None
     try:
-        conn = pymysql.connect(**app.config.get('DB_CONFIG', {
-            'user': 'root',
-            'password': '@Love3344521@',
-            'database': 'userdb',
-            'host': 'localhost',
-            'port': 3306
-        }))
+        conn = pymysql.connect(**db_conf)
         return conn
     except Exception as e:
         print(f"数据库连接失败：{e}")
         return None
 
 
+# ============= 安全工具（鉴权 / 文件名清洗 / 路径校验） =============
+_WINDOWS_RESERVED_NAMES = {
+    'CON', 'PRN', 'AUX', 'NUL',
+    *{f'COM{i}' for i in range(1, 10)},
+    *{f'LPT{i}' for i in range(1, 10)},
+}
+_UNSAFE_FILENAME_CHARS = re.compile(r'[^0-9A-Za-z\u4e00-\u9fff._\- ]')
+
+
+def safe_filename(name, fallback='file', max_stem=80):
+    """把用户提供的文件名清洗成可安全落盘的「纯文件名」。
+
+    用户上传的 filename 完全可信度为零，可能带 `../`、盘符、控制字符或 Windows
+    保留设备名。这里只保留最后一段并过滤特殊字符，中文原样保留（避免
+    werkzeug.secure_filename 把中文名清成空串而丢失作品名）。
+    """
+    # Windows 上 os.path.basename 同时处理 / 和 \，先统一分隔符更稳妥
+    name = os.path.basename(str(name or '').replace('\\', '/'))
+    stem, ext = os.path.splitext(name)
+    ext = _UNSAFE_FILENAME_CHARS.sub('', ext)[:12]
+    stem = _UNSAFE_FILENAME_CHARS.sub('_', stem).strip('. ')
+    if not stem:
+        stem = fallback
+    if stem.upper() in _WINDOWS_RESERVED_NAMES:
+        stem = f'_{stem}'
+    return f'{stem[:max_stem]}{ext}'
+
+
+def ensure_inside(base_dir, target_path):
+    """确认 target_path 解析后仍位于 base_dir 之内，用于防目录穿越。"""
+    base = os.path.abspath(base_dir)
+    target = os.path.abspath(target_path)
+    try:
+        return os.path.commonpath([base, target]) == base
+    except ValueError:      # 不同盘符，commonpath 会抛异常
+        return False
+
+
+def media_url(relative_path):
+    """把站内相对路径转成对外 URL。
+
+    修复前这里把带端口的主机名写死在返回值里，导致换端口、局域网访问、
+    反向代理域名下一律黑屏。现在默认返回相对路径（`/uploads/xxx`），
+    任何访问方式都正确；需要 CDN/绝对地址时设环境变量 PUBLIC_BASE_URL。
+    """
+    base = app.config.get('PUBLIC_BASE_URL') or ''
+    rel = '/' + str(relative_path).lstrip('/')
+    return f"{base}{rel}" if base else rel
+
+
+def is_auditor(user_id=None):
+    """判断当前（或指定）用户是否为审核员。"""
+    user_id = user_id or session.get('user_id')
+    if not user_id:
+        return False
+    conn = get_db()
+    if not conn:
+        return False
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1 FROM auditor WHERE user_id = %s', (user_id,))
+        return cursor.fetchone() is not None
+    except Exception as e:
+        logger.error(f"审核员校验失败: {e}")
+        return False
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def login_required_api(view):
+    """API 装饰器：未登录直接 401 JSON。"""
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if 'user_id' not in session:
+            return jsonify({'success': False, 'error': '请先登录', 'message': '请先登录'}), 401
+        return view(*args, **kwargs)
+    return wrapper
+
+
+def auditor_required_api(view):
+    """API 装饰器：必须是审核员，否则 403 JSON。
+
+    修复前 /reject_video、/tongguo_video 只校验登录（或完全不校验），
+    任何注册用户都能让任意投稿过审 / 被拒。
+    """
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if 'user_id' not in session:
+            return jsonify({'success': False, 'error': '请先登录', 'message': '请先登录'}), 401
+        if not is_auditor():
+            logger.warning(
+                f"越权拦截: user_id={session.get('user_id')} "
+                f"username={session.get('username')} path={request.path}"
+            )
+            return jsonify({'success': False, 'error': '需要审核员权限',
+                            'message': '需要审核员权限'}), 403
+        return view(*args, **kwargs)
+    return wrapper
+
+
+# ============= 降级保护：数据库不可用时数据接口返回 503 =============
+_DB_STATE = {'ok': None, 'checked_at': 0.0}
+
+# 需要数据库的路由前缀；其余（页面、静态资源、/healthz）不受影响。
+# 注意：/NOAIshenhe 是页面而非接口，它自己的鉴权逻辑会把匿名用户重定向到登录页，
+# 让它走 503 反而不友好，所以不列进来。
+_DB_ROUTE_PREFIXES = ('/api/', '/upload', '/tongguo_video', '/reject_video',
+                      '/shenheyuan')
+
+
+def db_available(max_age=5.0):
+    """带缓存的数据库可用性探测，避免每个请求都新开一次连接。"""
+    now = time.time()
+    if _DB_STATE['ok'] is None or (now - _DB_STATE['checked_at']) > max_age:
+        conn = get_db()
+        _DB_STATE['ok'] = conn is not None
+        _DB_STATE['checked_at'] = now
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return bool(_DB_STATE['ok'])
+
+
+@app.before_request
+def _require_db_for_data_routes():
+    """数据库不可用时，数据类接口统一返回 503 JSON。
+
+    修复：原先 get_db() 返回 None 后，路由里的 conn.cursor() 会抛 AttributeError，
+    表现为 500 + traceback（debug 下直接暴露源码）。现在明确 503 和可读提示。
+    """
+    if not request.path.startswith(_DB_ROUTE_PREFIXES):
+        return None
+    if request.url_rule is None:
+        # 路径根本没匹配到路由：交给 404 处理器，别误报成"数据库不可用"
+        return None
+    if db_available():
+        return None
+    return jsonify({
+        'success': False,
+        'error': '数据库暂不可用：请确认 MySQL 已启动、库已创建、口令正确，'
+                 '状态见 /healthz',
+    }), 503
+
+
 def create_users_table():
     conn = get_db()
     if not conn:
-        return
+        logger.error("数据库不可用，跳过建表")
+        return False
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -269,6 +482,39 @@ CREATE TABLE IF NOT EXISTS folder_backgrounds(
     UNIQUE KEY unique_folder (user_id, folder_name)
 )
 ''')
+    # 审核员申请审批表（安全修复：不再「满 30 天自动成为审核员」，改为申请 + 管理员审批）
+    cursor.execute('''
+CREATE TABLE IF NOT EXISTS auditor_apply(
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_apply (user_id),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+)
+''')
+    # ===== 补齐历史遗留的表/字段 =====
+    # 下面这两项代码里一直在用（共 19 处 SQL），但建表脚本从来没过建过 ——
+    # 原项目是直接在已有数据库上手工加的，换台机器/空库就会全部 500。
+    cursor.execute('''
+        SELECT COUNT(*) FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users'
+          AND COLUMN_NAME = 'fav_bg_url'
+    ''')
+    if cursor.fetchone()[0] == 0:
+        cursor.execute('ALTER TABLE users ADD COLUMN fav_bg_url VARCHAR(500) NULL')
+        print("已补充字段 users.fav_bg_url")
+
+    cursor.execute('''
+CREATE TABLE IF NOT EXISTS fav_backgrounds(
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    image_url VARCHAR(500) NOT NULL,
+    is_current TINYINT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+)
+''')
     conn.commit()
     cursor.close()
     conn.close()
@@ -314,10 +560,8 @@ def api_carousel():
 
 @app.route('/carousel/<filename>')
 def serve_carousel_img(filename):
-    import os
-    carousel_path = 'E:/项目/xiangmu/static/carousel'
-    print(f"请求轮播图: {filename} -> {os.path.join(carousel_path, filename)}")
-    return send_from_directory(carousel_path, filename)
+    # 修复：轮播图目录改为配置项（原来写死 E 盘，本机不存在该盘）
+    return send_from_directory(app.config['CAROUSEL_DIR'], filename)
 
 @app.route('/uploadNOAI', methods=['POST'])
 def uploadNOAI():
@@ -337,24 +581,27 @@ def uploadNOAI():
     
     # 3. 检查文件类型（加上点号）
     allowed_extensions = {'.mp4', '.mov'}
-    filename, ext = os.path.splitext(file.filename)
+    raw_name = os.path.basename((file.filename or '').replace('\\', '/'))
+    filename, ext = os.path.splitext(raw_name)
     ext = ext.lower()
     
     if ext not in allowed_extensions:
         return jsonify({'status': 'error', 'message': f'不支持的文件格式: {ext}'}), 400
     
-    # 4. 生成安全文件名（防止重名覆盖）
-    safe_filename = f"{filename}_{uuid.uuid4().hex[:6]}{ext}"
+    # 4. 生成安全文件名（清洗 + 去重，防路径穿越与重名覆盖）
+    stored_name = f"{safe_filename(filename)}_{uuid.uuid4().hex[:6]}{ext}"
     
     # 5. 保存文件
-    NOAI_dir = r'E:\项目\xiangmu\NOAIuploads'
+    NOAI_dir = app.config['NOAI_DIR']
     os.makedirs(NOAI_dir, exist_ok=True)
     
-    file_path = os.path.join(NOAI_dir, safe_filename)
+    file_path = os.path.join(NOAI_dir, stored_name)
+    if not ensure_inside(NOAI_dir, file_path):
+        return jsonify({'status': 'error', 'message': '非法文件名'}), 400
     file.save(file_path)
     
     # 6. 数据库存可访问的 URL 路径
-    relative_path = f"/NOAIuploads/{safe_filename}"
+    relative_path = f"/NOAIuploads/{stored_name}"
     
     # 7. 插入数据库
     try:
@@ -383,32 +630,47 @@ def uploadNOAI():
 @app.route('/upload', methods=['POST'])
 def upload():
     if 'user_id' not in session:
-        return jsonify({'error': '请先登录'})
+        return jsonify({'error': '请先登录'}), 401
     user_id = session.get('user_id')
     username = session.get('username')
+    if 'file' not in request.files:
+        return jsonify({'success': False, 'error': '请选择文件'}), 400
     file=request.files['file']
-    filename,ext=os.path.splitext(file.filename)
-    safe_filename = f"{filename}_{uuid.uuid4().hex[:6]}{ext}"
+    # 安全修复：原始文件名可能含 ../ 或盘符；落盘路径一律用清洗后的名字（中文保留）
+    raw_name = os.path.basename((file.filename or '').replace('\\', '/'))
+    filename,ext=os.path.splitext(raw_name)
+    ext=ext.lower()
+    display_name = raw_name[:200] or '未命名作品'
+    clean_stem = safe_filename(filename)
+    stored_file = f"{clean_stem}{ext}"
+    upload_dir = f"{clean_stem}_{uuid.uuid4().hex[:6]}{ext}"
+    upload_root = app.config['UPLOAD_DIR']
+    jpg_root = app.config['JPG_DIR']
     if ext in ['.mp4','.mov']:
-        folder=rf'E:\项目\xiangmu\uploads\{safe_filename}'
+        base_root = upload_root
+        folder = os.path.join(upload_root, upload_dir)
     elif ext=='.jpg':
-        folder=rf'E:\项目\xiangmu\static\jpg\{safe_filename}'
+        base_root = jpg_root
+        folder = os.path.join(jpg_root, upload_dir)
     else:
-        return "文件类型无效！"
-    # filePath=os.path.join(folder,filename+ext)
-    # os.makedirs(folder,exist_ok=True)
-    # with open(filePath,'wb') as f:
-    #     f.write(file.read())
-    temp_dir = r'E:\项目\xiangmu\uploads\temp_video'
+        return "文件类型无效！", 400
+    # 双保险：解析后的落盘目录必须仍在允许的根目录内，防目录穿越
+    if not ensure_inside(base_root, folder):
+        return jsonify({'success': False, 'error': '非法文件名'}), 400
+    temp_dir = os.path.join(upload_root, 'temp_video')
     os.makedirs(temp_dir, exist_ok=True)
-    temp_path = os.path.join(temp_dir, f'temp_{file.filename}')
+    temp_path = os.path.join(temp_dir, f'temp_{uuid.uuid4().hex[:8]}{ext}')
     file.save(temp_path)
     
     # 2. 抽帧
     frames = extract_frames(temp_path, max_frames=15)
 
-    # 3. AI审核
-    result = video_auditor.audit_video(frames, file.filename)
+    # 3. AI审核（安全修复：AI 模块不可用时降级为「拒绝并提示走人工通道」，不再 500）
+    if video_auditor:
+        result = video_auditor.audit_video(frames, display_name)
+    else:
+        result = {'passed': False, 'score': 0,
+                  'message': 'AI 审核模块不可用，请改用人工审核通道投稿'}
     
     # 4. 如果不通过，删除临时文件并拒绝
     if not result.get('passed', False):
@@ -419,22 +681,20 @@ def upload():
             'score': result.get('score'),
             'message': result.get('message')
         }), 403
-    # file.save(filePath)
-    folder = rf'E:\项目\xiangmu\uploads\{safe_filename}'
     os.makedirs(folder, exist_ok=True)
-    filePath = os.path.join(folder, filename + ext)
+    filePath = os.path.join(folder, stored_file)
     shutil.move(temp_path, filePath)
     file_size=os.path.getsize(filePath)
     if ext in ['.mp4','.mov']:
-        zuopin_url=f"http://localhost:5000/uploads/{safe_filename}/{filename}{ext}"
+        zuopin_url = media_url(f"uploads/{upload_dir}/{stored_file}")
     else:
-        zuopin_url=f"http://localhost:5000/static/jpg/{filename}{ext}"
+        zuopin_url = media_url(f"static/jpg/{upload_dir}/{stored_file}")
     cover=None    
     if ext in ['.mp4','.mov']:
         cover=vitalframe(filePath,folder)
 
     if cover:
-        cover = f"http://localhost:5000/uploads/{safe_filename}/vitalframe.jpg"
+        cover = media_url(f"uploads/{upload_dir}/vitalframe.jpg")
     else:
         cover = None
     conn=get_db()
@@ -449,8 +709,8 @@ def upload():
     cursor.execute(sql,(
         user_id,
         username,
-        file.filename,
-        filename+ext,
+        display_name,
+        stored_file,
         filePath,
         zuopin_url,
         file_size,
@@ -473,10 +733,10 @@ def upload():
         })
 
 @app.route('/tongguo_video', methods=['POST'])
+@auditor_required_api
 def tongguo_video():
-    # 1. 检查登录状态（审核员必须登录）
-    if 'user_id' not in session:
-        return jsonify({'error': '请先登录'}), 401
+    # 安全修复：原实现只校验「已登录」，任何注册用户都能让任意投稿过审入库。
+    # 现要求必须是审核员（auditor 表内用户）。
     # 2. 获取待审核视频的 ID 和标签
     shenhe_id = request.form.get('shenhe_id')
     tag = request.form.get('tag')
@@ -506,10 +766,11 @@ def tongguo_video():
     filename = os.path.basename(zuopin_url)
     name_without_ext, ext = os.path.splitext(filename)
     # 6. 生成存储路径
-    folder = rf'E:\项目\xiangmu\uploads\{name_without_ext}'
+    upload_root = app.config['UPLOAD_DIR']
+    folder = os.path.join(upload_root, name_without_ext)
     os.makedirs(folder, exist_ok=True)
     # 7. 移动文件
-    old_path = os.path.join(r'E:\项目\xiangmu\NOAIuploads', filename)
+    old_path = os.path.join(app.config['NOAI_DIR'], filename)
     new_path = os.path.join(folder, filename)
     shutil.move(old_path, new_path)
     
@@ -518,16 +779,16 @@ def tongguo_video():
     
     # 9. 生成 URL
     if ext.lower() in ['.mp4', '.mov']:
-        zuopin_url_new = f"http://localhost:5000/uploads/{name_without_ext}/{filename}"
+        zuopin_url_new = media_url(f"uploads/{name_without_ext}/{filename}")
     else:
-        zuopin_url_new = f"http://localhost:5000/static/jpg/{filename}"
+        zuopin_url_new = media_url(f"static/jpg/{filename}")
     
     # 10. 生成封面
     cover = None
     if ext.lower() in ['.mp4', '.mov']:
         cover = vitalframe(new_path, folder)
         if cover:
-            cover = f"http://localhost:5000/uploads/{name_without_ext}/vitalframe.jpg"
+            cover = media_url(f"uploads/{name_without_ext}/vitalframe.jpg")
     
     # 11. 插入 video_records 表
     try:
@@ -576,7 +837,9 @@ def tongguo_video():
         return jsonify({'error': f'入库失败: {str(e)}'}), 500
     
 @app.route('/reject_video', methods=['POST'])
+@auditor_required_api
 def reject_video():
+    # 安全修复：原实现完全无鉴权，任何人 POST 即可把任意投稿标记为「已拒绝」
     shenhe_id = request.form.get('shenhe_id')
     reason = request.form.get('reason', '违规内容')
     conn = get_db()
@@ -605,7 +868,7 @@ def confirm_reject():
     record = cursor.fetchone()
     if record:
         filename = os.path.basename(record['zuopin_url'])
-        file_path = os.path.join(r'E:\项目\xiangmu\NOAIuploads', filename)
+        file_path = os.path.join(app.config['NOAI_DIR'], filename)
         if os.path.exists(file_path):
             os.remove(file_path)
         cursor.execute('DELETE FROM NOAI_shenhe WHERE id = %s', (shenhe_id,))
@@ -639,7 +902,9 @@ def get_user_video_status():
     return jsonify({'success': True, 'records': records})
 
 @app.route('/api/videosNOAI', methods=['GET'])
+@auditor_required_api
 def get_videosNOAI():
+    # 安全修复：待审核队列是审核员工作台数据，不应向所有（含匿名）用户开放
     conn = get_db()
     cursor = conn.cursor(pymysql.cursors.DictCursor)
     # 关联 users 表查询作者姓名
@@ -665,16 +930,36 @@ def get_videosNOAI():
 
 @app.route('/api/videos', methods=['GET'])
 def get_videos():
+    # 修复 1：原先 SELECT 里没有 tags，而 shipin1~5 五个页面的 JS 是按 v.tags 过滤分类的，
+    #         所以这五个页面恒显示"该分类暂无视频"。这里补上 tags。
+    # 修复 2：补上 username（前端两套字段名 author_name / username 都在用）。
+    # 修复 3：支持可选分页 ?page=1&size=20；不传时行为与原来完全一致（全量返回）。
+    page = request.args.get('page', type=int)
+    size = request.args.get('size', type=int)
+    paginate = bool(page and size)
+    if paginate:
+        page = max(1, page)
+        size = max(1, min(size, 100))
+
     conn = get_db()
     cursor = conn.cursor(pymysql.cursors.DictCursor)
     # 关联 users 表查询作者姓名
-    cursor.execute('''
-        SELECT v.id, v.user_id,v.zuopin_name, v.zuopin_url, v.cover_path, v.file_size, 
-               v.upload_time, v.view_count, u.name as author_name
+    sql = '''
+        SELECT v.id, v.user_id, v.zuopin_name, v.zuopin_url, v.cover_path, v.file_size,
+               v.upload_time, v.view_count, v.tags, v.username, u.name as author_name
         FROM video_records v
         LEFT JOIN users u ON v.user_id = u.id
         ORDER BY v.upload_time DESC
-    ''')
+    '''
+    total = None
+    if paginate:
+        cnt = conn.cursor()
+        cnt.execute('SELECT COUNT(*) FROM video_records')
+        total = cnt.fetchone()[0]
+        cnt.close()
+        cursor.execute(sql + ' LIMIT %s OFFSET %s', (size, (page - 1) * size))
+    else:
+        cursor.execute(sql)
     zuopin = cursor.fetchall()
     cursor.close()
     conn.close()
@@ -684,13 +969,23 @@ def get_videos():
         if item.get('upload_time'):
             item['upload_time'] = item['upload_time'].strftime('%Y-%m-%d %H:%M:%S')
     
-    return jsonify({'video': zuopin})
+    payload = {'video': zuopin}
+    if paginate:
+        payload.update({'page': page, 'size': size, 'total': total,
+                        'has_more': page * size < (total or 0)})
+    return jsonify(payload)
 
 @app.route('/api/video/<int:id>',methods=['GET'])#根据id获取单个视频信息
 def get_video(id):
     conn=get_db()
     cursor=conn.cursor(pymysql.cursors.DictCursor)
-    cursor.execute("SELECT * FROM video_records WHERE id=%s",(id,))
+    # 修复：原来 SELECT * 会把 zuopin_path（服务器绝对路径）、saved_name 一起吐给前端，
+    # 属于不必要的信息暴露。改为显式列白名单（前端只用这些字段）。
+    cursor.execute('''
+        SELECT id, user_id, username, zuopin_name, zuopin_url, cover_path,
+               file_size, upload_time, view_count, tags, audit_result
+        FROM video_records WHERE id=%s
+    ''', (id,))
     zuopin=cursor.fetchone()
     cursor.close()
     conn.close()
@@ -699,7 +994,11 @@ def get_video(id):
     return jsonify({'error':'视频不存在!'})
 
 @app.route('/api/user/liked-videos/<int:user_id>', methods=['GET'])
+@login_required_api
 def get_likevideos(user_id):
+    # 安全修复：原实现无鉴权也不比对 session，遍历 user_id 即可拉取任意用户点赞列表（IDOR）
+    if user_id != session.get('user_id'):
+        return jsonify({'success': False, 'error': '无权查看其他用户的数据'}), 403
     conn = get_db()
     cursor = conn.cursor(pymysql.cursors.DictCursor)
     cursor.execute('''
@@ -720,7 +1019,11 @@ def get_likevideos(user_id):
 
 
 @app.route('/api/user/history-videos/<int:user_id>', methods=['GET'])
+@login_required_api
 def get_lishivideos(user_id):
+    # 安全修复：同上，浏览历史属于隐私数据（IDOR）
+    if user_id != session.get('user_id'):
+        return jsonify({'success': False, 'error': '无权查看其他用户的数据'}), 403
     conn = get_db()
     cursor = conn.cursor(pymysql.cursors.DictCursor)
     cursor.execute('''
@@ -852,12 +1155,16 @@ def increment_video_views(video_id):
 
 
 @app.route('/api/user/<int:user_id>/shoucangjia/<string:SCname>',methods=['GET'])#调用收藏数据库(每个收藏夹中的每个视频)
+@login_required_api
 def get_SCdoc(user_id,SCname):
+    # 安全修复：原实现无鉴权（IDOR），任何人可读任意用户收藏夹内容
+    if user_id != session.get('user_id'):
+        return jsonify({'success': False, 'error': '无权查看其他用户的收藏'}), 403
     conn=get_db()
     cursor=conn.cursor(pymysql.cursors.DictCursor)
     cursor.execute("SELECT * FROM shoucang WHERE user_id=%s AND SCname=%s",(user_id,SCname))
     SCname_video=cursor.fetchone()
-    cursor.close
+    cursor.close()
     conn.close()
     if SCname_video:
         return jsonify({'SCname_video':SCname_video})
@@ -866,19 +1173,48 @@ def get_SCdoc(user_id,SCname):
 
 @app.route('/uploads/<path:filename>')
 def serve_upload(filename):
-    return send_from_directory(r'E:\项目\xiangmu\uploads', filename)
+    return send_from_directory(app.config['UPLOAD_DIR'], filename)
 
 @app.route('/static/<path:filename>')
 def serve_static(filename):
-    return send_from_directory(r'E:\项目\xiangmu\static', filename)
+    # 修复：改用 Flask 的 static_folder（项目内 static），不再写死 E 盘路径
+    return send_from_directory(app.static_folder, filename)
 
 @app.route('/NOAIuploads/<filename>')
-def serve_noai_uploads(filename):
-    return send_from_directory(r'E:\项目\xiangmu\NOAIuploads', filename)
+def serve_noai_uploads(filename):    # 安全修复：待审/被拒投稿原先可被任何人匿名下载（审核员还没看、投稿人还没确认）。
+    # 现在只允许：审核员、或该投稿记录的所有者本人。
+    if 'user_id' not in session:
+        return jsonify({'error': '请先登录'}), 401
+    if not is_auditor():
+        conn_ = get_db()
+        if not conn_:
+            return jsonify({'error': '服务异常'}), 500
+        cur_ = None
+        try:
+            cur_ = conn_.cursor(pymysql.cursors.DictCursor)
+            cur_.execute('SELECT user_id FROM NOAI_shenhe WHERE zuopin_url LIKE %s',
+                         (f'%{filename}%',))
+            row = cur_.fetchone()
+        finally:
+            if cur_ is not None:
+                try:
+                    cur_.close()
+                except Exception:
+                    pass
+            conn_.close()
+        if not row or row.get('user_id') != session.get('user_id'):
+            return jsonify({'error': '无权访问该文件'}), 403
+    return send_from_directory(app.config['NOAI_DIR'], filename)
 
 @app.route('/index')
 def index():
     return render_template('index.html')
+
+
+@app.route('/goto')
+def goto_index():
+    """修复：6 个个人主页模板的顶栏写的是 href="/goto"，而后端从来没有这个路由（一直 404）。"""
+    return redirect(url_for('index'))
 
 @app.route('/register', methods=['POST', 'GET'])
 def register():
@@ -932,6 +1268,7 @@ def login():
             cursor.close()
             conn.close()
             if user and check_password_hash(user['password'], password):
+                session.clear()      # 安全修复：登录后重建会话，防会话固定（Session Fixation）
                 session['user_id'] = user['id']
                 session['username'] = user['username']
                 session['name'] = user.get('name', user['username'])
@@ -993,7 +1330,7 @@ def get_user():
     return jsonify({"name": "获取失败"})
 #设置功能的api
 #用户头像存储功能
-AVATAR_FOLDER = r'E:\项目\xiangmu\static\avatars'
+AVATAR_FOLDER = app.config['AVATAR_DIR']
 os.makedirs(AVATAR_FOLDER, exist_ok=True)
 
 @app.route('/api/upload_avatar', methods=['POST'])
@@ -1046,7 +1383,7 @@ def update_touxiang():
         return jsonify({'msg':'修改成功'})
 
 # 背景修改功能
-BG_FOLDER = r'E:\项目\xiangmu\static\backgrounds'
+BG_FOLDER = app.config['BG_DIR']
 os.makedirs(BG_FOLDER, exist_ok=True)
 
 @app.route('/api/upload_bg', methods=['POST'])
@@ -1078,7 +1415,7 @@ def update_signature():
     conn=get_db()
     if conn:
         cursor=conn.cursor(pymysql.cursors.DictCursor)
-        cursor.execute('SELECT signature FROM users WHERE id= %s',(user_id))
+        cursor.execute('SELECT signature FROM users WHERE id= %s', (user_id,))
         user=cursor.fetchone()
         old_signature=user['signature'] if user else None
         cursor.close()
@@ -1110,9 +1447,8 @@ def get_signature():
     
     return jsonify({'signature': user['signature'] if user else ''})
 
-BG_FOLDER1 = os.path.join(app.static_folder, 'dynamics', 'bg')  # 改成你实际路径
-if not os.path.exists(BG_FOLDER1):
-    os.makedirs(BG_FOLDER1)
+BG_FOLDER1 = app.config['FAV_BG_DIR']
+os.makedirs(BG_FOLDER1, exist_ok=True)
 
 
 # ============= 收藏夹单独背景管理 =============
@@ -1246,9 +1582,14 @@ def del_bg_image():
     conn.close()
     
     return jsonify({"msg": "删除成功"})
-@app.route('/api/cleanAllInvalidFavBg')
+@app.route('/api/cleanAllInvalidFavBg', methods=['POST'])
+@auditor_required_api
 def clean_all_invalid_fav_bg():
-    """一次性清理所有无效的收藏夹背景记录（新旧表都清理）"""
+    """一次性清理所有无效的收藏夹背景记录（新旧表都清理）
+
+    安全修复：原实现完全无鉴权，任何人访问一次就会 os.remove 背景图片并删库记录。
+    现要求审核员权限，并改为 POST（会删文件的接口不该是 GET）。
+    """
     import os
     
     cleaned_users = 0
@@ -1401,9 +1742,11 @@ def upload_SCbg():
     if file.filename == '':
         return jsonify({'msg': '未选择文件', 'success': False}), 400
 
-    # 生成唯一文件名，防止覆盖
-    ext = file.filename.rsplit('.', 1)[1].lower()
-    filename = f"{uuid.uuid4().hex}.{ext}"
+    # 生成唯一文件名，防止覆盖（安全修复：原 rsplit 在无扩展名时会 IndexError）
+    ext = os.path.splitext(os.path.basename((file.filename or '').replace('\\', '/')))[1].lower()
+    if ext not in ['.jpg', '.jpeg', '.png', '.webp', '.gif']:
+        return jsonify({'msg': '只支持图片格式', 'success': False}), 400
+    filename = f"{uuid.uuid4().hex}{ext}"
     save_path = os.path.join(BG_FOLDER1, filename)
     file.save(save_path)
 
@@ -1544,8 +1887,9 @@ def video_audit():
     return render_template('video_audit.html', username=session.get('username'))
 
 @app.route('/api/audit', methods=['POST'])
+@login_required_api
 def api_audit():
-    """AI视频审核API"""
+    """AI视频审核API（安全修复：原先无登录校验，且 AI 缺失时 fail-open）"""
     try:
         # 检查文件
         if 'video' not in request.files:
@@ -1565,34 +1909,23 @@ def api_audit():
         logger.info(f"抽帧完成，共{len(frames)}帧")
         
         # AI审核
-        if video_auditor:
-            result = video_auditor.audit_video(frames, original_filename)
-        else:
-            # 模拟审核结果
-            result = {
-                'passed': True,
-                'violations': [],
-                'confidence': 95,
-                'frames_analyzed': len(frames),
-                'frame_details': [],
-                'message': '模拟模式：审核通过'
-            }
+        # 安全修复：原先 AI 模块缺失时构造 {'passed': True, 'message': '模拟模式：审核通过'}，
+        # 即 fail-open，与 /upload 的 fail-closed 自相矛盾。现统一为不可用即 503。
+        if not video_auditor:
+            delete_video(filepath)
+            return jsonify({'error': 'AI 审核模块不可用，请改用人工审核通道'}), 503
+        result = video_auditor.audit_video(frames, original_filename)
         
-        # 保存审核记录
-        if 'user_id' in session:
-            try:
-                record = VideoRecord(
-                    user_id=session['user_id'],
-                    username=session.get('username'),
-                    zuopin_name=filename,
-                    audit_result='passed' if result.get('passed') else 'failed',
-                    violations=','.join(result.get('violations', [])),
-                    confidence=result.get('confidence', 0)
-                )
-                db.session.add(record)
-                db.session.commit()
-            except Exception as e:
-                logger.error(f"保存记录失败: {e}")
+        # 审核记录
+        # 安全修复：原先把「审核记录」写进 video_records（作品表），而该表会出现在公共
+        # /api/videos 列表里 —— 任何登录用户都能借此往公共作品流注入空壳卡片。
+        # 审核日志改为只写应用日志（该接口对应的页面 video_audit.html 本来就不存在）。
+        logger.info(
+            f"审核记录 user={session.get('user_id')} file={filename} "
+            f"passed={bool(result.get('passed'))} "
+            f"violations={','.join(result.get('violations') or [])} "
+            f"confidence={result.get('confidence', 0)}"
+        )
         
         # 清理临时文件
         delete_video(filepath)
@@ -1694,7 +2027,43 @@ def add_comment():
         
         conn = get_db()
         cursor = conn.cursor(pymysql.cursors.DictCursor)
-        
+
+        # 安全修复：reply_to_* 原先完全由客户端提供，可伪造「回复@某人」的通知推给任意用户；
+        # 现改为服务端按 parent_id 反查，并校验父评论与视频的归属（防跨视频串楼）。
+        try:
+            video_id_int = int(video_id)
+            parent_id_int = int(parent_id or 0)
+        except (TypeError, ValueError):
+            cursor.close()
+            conn.close()
+            return jsonify({'success': False, 'error': '参数不合法'}), 400
+
+        cursor.execute('SELECT id FROM video_records WHERE id = %s', (video_id_int,))
+        if not cursor.fetchone():
+            cursor.close()
+            conn.close()
+            return jsonify({'success': False, 'error': '视频不存在'}), 404
+
+        if parent_id_int:
+            cursor.execute(
+                'SELECT id, video_id, user_id, username, name FROM comments WHERE id = %s',
+                (parent_id_int,))
+            parent = cursor.fetchone()
+            if not parent:
+                cursor.close()
+                conn.close()
+                return jsonify({'success': False, 'error': '被回复的评论不存在'}), 404
+            if int(parent['video_id']) != video_id_int:
+                cursor.close()
+                conn.close()
+                return jsonify({'success': False, 'error': '评论与视频不匹配'}), 400
+            reply_to_user_id = parent['user_id']
+            reply_to_username = parent['username']
+            reply_to_name = parent['name']
+
+        video_id = video_id_int
+        parent_id = parent_id_int
+
         cursor.execute('''
             INSERT INTO comments 
             (video_id, user_id, username, name, content, parent_id, 
@@ -2017,7 +2386,7 @@ def toggle_dianzan(video_id):
 
 #====发布动态api
 # 动态图片存储目录
-DYNAMIC_FOLDER = r'E:\项目\xiangmu\static\dynamics'
+DYNAMIC_FOLDER = app.config['DYNAMIC_DIR']
 os.makedirs(DYNAMIC_FOLDER, exist_ok=True)
 
 @app.route('/api/dynamics', methods=['POST'])
@@ -2032,6 +2401,10 @@ def publish_dynamic():
     
     if not content and not image:
         return jsonify({'success': False, 'error': '内容或图片不能都为空'}), 400
+
+    # 安全修复：正文原先无长度上限（MAX_CONTENT_LENGTH 是 500MB），单请求可写入数百 MB
+    if len(content) > 2000:
+        return jsonify({'success': False, 'error': '动态正文最多 2000 字'}), 400
     
     image_url = None
     if image:
@@ -2326,7 +2699,12 @@ def api_recommend():
     try:
         data = request.json
         query = data.get('query', '热门推荐')
-        top_k = data.get('top_k', 10)
+        # 安全修复：top_k 由客户端提供并直接进 LIMIT，需转成整数并夹紧范围
+        try:
+            top_k = int(data.get('top_k', 10))
+        except (TypeError, ValueError):
+            top_k = 10
+        top_k = max(1, min(top_k, 50))
         if not query:
             if recommender:
                 results = recommender.recommend('热门推荐', top_k)
@@ -2387,16 +2765,34 @@ def format_views(count):
     return str(count)
 
 @app.route('/api/stream/start', methods=['POST'])
+@auditor_required_api
 def api_stream_start():
-    """启动推流API//功能还未实现"""
+    """启动推流API//功能还未实现
+
+    安全修复：该接口原先**完全无鉴权** —— 匿名请求即可让服务器用 ffmpeg 把任意
+    本地媒体文件推到攻击者指定的 RTMP 地址，并可无限拉起进程。现在：
+      ① 仅审核员可调用；② 默认关闭，需显式设置环境变量 ENABLE_STREAM_API=1；
+      ③ video_path 必须落在上传目录内且文件真实存在；④ 推流地址只允许 rtmp(s)://。
+    """
+    if os.environ.get('ENABLE_STREAM_API', '0') != '1':
+        return jsonify({'error': '推流功能未启用（该功能尚未完成）'}), 403
     try:
-        data = request.json
+        data = request.json or {}
         video_path = data.get('video_path')
         rtmp_url = data.get('rtmp_url', 'rtmp://localhost/live/stream')
         
         if not video_path:
             return jsonify({'error': '请提供视频路径'}), 400
-        
+
+        # 安全修复：路径必须在上传根目录内，且必须是已存在的普通文件
+        upload_root = app.config['UPLOAD_DIR']
+        if not ensure_inside(upload_root, video_path):
+            return jsonify({'error': '非法的视频路径'}), 400
+        if not os.path.isfile(video_path):
+            return jsonify({'error': '视频文件不存在'}), 404
+        if not str(rtmp_url).lower().startswith(('rtmp://', 'rtmps://')):
+            return jsonify({'error': '非法的推流地址'}), 400
+
         pusher = StreamPusher()
         success = pusher.start(video_path, rtmp_url)
         
@@ -2600,11 +2996,18 @@ def delete_video_api(video_id):
     conn.close()
     
     # 删除视频文件（可选）
+    # 安全修复：原实现直接 rmtree(dirname(zuopin_path))，若历史数据少一层目录就会删掉整个 uploads
     try:
         if video.get('zuopin_path'):
-            shutil.rmtree(os.path.dirname(video['zuopin_path']), ignore_errors=True)
-    except:
-        pass
+            upload_root = app.config['UPLOAD_DIR']
+            target_dir = os.path.dirname(video['zuopin_path'])
+            if (ensure_inside(upload_root, target_dir)
+                    and os.path.abspath(target_dir) != os.path.abspath(upload_root)):
+                shutil.rmtree(target_dir, ignore_errors=True)
+            else:
+                logger.warning(f"拒绝删除越界目录: {target_dir}")
+    except Exception as e:
+        logger.warning(f"删除视频目录失败: {e}")
     
     return jsonify({'success': True, 'message': '删除成功'})
 
@@ -2617,6 +3020,10 @@ def update_video_status(video_id):
     user_id = session['user_id']
     data = request.get_json()
     status = data.get('status', 'hidden')
+
+    # 安全修复：状态值原先可以是任意字符串并直接写库，改为白名单
+    if status not in ('visible', 'hidden', 'pending'):
+        return jsonify({'success': False, 'error': '非法的状态值'}), 400
     
     conn = get_db()
     cursor = conn.cursor()
@@ -2656,11 +3063,11 @@ def check_shenheyuan():
     conn.close()
     return jsonify({'is_shenheyuan': result is not None})
 
-@app.route('/shenheyuan')
+@app.route('/shenheyuan', methods=['POST'])
+@login_required_api
 def shenheyuan():
-    if 'user_id' not in session:
-        return jsonify({'status': 'error', 'message': '请先登录'}), 401
-    
+    # 安全修复：这是「状态变更」接口（把用户写进 auditor 表），原先走 GET，
+    # 一个 <img src="/shenheyuan"> 就能借受害者身份触发。改为 POST。
     user_id = session['user_id']
     conn = get_db()
     cursor = conn.cursor(pymysql.cursors.DictCursor)
@@ -2682,12 +3089,37 @@ def shenheyuan():
             'status': 'error', 
             'message': f'注册未满30天（已{days_since_register}天，还需{remaining}天）'
         }), 403
-    # 4. 添加到审核员表
-    cursor.execute('INSERT INTO auditor (user_id) VALUES (%s)', (user_id,))
+    # 4. 已是审核员则直接返回（幂等）
+    cursor.execute('SELECT 1 FROM auditor WHERE user_id = %s', (user_id,))
+    if cursor.fetchone():
+        cursor.close()
+        conn.close()
+        return jsonify({'status': 'success', 'message': '你已经是审核员了'})
+
+    # 5. 安全修复：不再「满 30 天即自动获得审核权限」。
+    #    默认只登记申请，权限必须由管理员在数据库里审批；
+    #    仅当显式开启 ALLOW_SELF_AUDITOR=1（本地演示）时才保留原来的自助开通行为。
+    if app.config.get('ALLOW_SELF_AUDITOR'):
+        cursor.execute('INSERT INTO auditor (user_id) VALUES (%s)', (user_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logger.warning(f"自助开通审核员(ALLOW_SELF_AUDITOR=1): user_id={user_id}")
+        return jsonify({'status': 'success',
+                        'message': f'注册已满{days_since_register}天，已开通审核员（自助模式）'})
+
+    cursor.execute('''
+        INSERT INTO auditor_apply (user_id, status) VALUES (%s, 'pending')
+        ON DUPLICATE KEY UPDATE status = IF(status = 'rejected', 'pending', status)
+    ''', (user_id,))
     conn.commit()
     cursor.close()
     conn.close()
-    return jsonify({'status': 'success', 'message': f'恭喜！注册已满{days_since_register}天，成功成为审核员'})
+    logger.warning(f"收到审核员申请: user_id={user_id} "
+                   f"username={session.get('username')} 注册天数={days_since_register}")
+    return jsonify({'status': 'success',
+                    'message': f'注册已满{days_since_register}天，申请已提交，等待管理员开通'
+                               f'（不会自动获得审核权限）'})
 
 @app.route('/zhuye')
 def zhuye():
@@ -2814,9 +3246,20 @@ def biaoqian():
         })
 @app.route('/NOAIshenhe')
 def NOAIshenhe():
+    # 安全修复：审核员工作台页面，非审核员不再放行
+    if 'user_id' not in session:
+        return redirect(url_for('loging'))
+    if not is_auditor():
+        flash('该页面仅审核员可访问')
+        return redirect(url_for('index'))
     return render_template('NOAIshenhe.html')
 @app.route('/NOAIshenhe/<int:id>')
 def shenhe_video(id):
+    # 安全修复：单条待审记录也属于审核员数据
+    if 'user_id' not in session:
+        return jsonify({'error': '请先登录'}), 401
+    if not is_auditor():
+        return jsonify({'error': '需要审核员权限'}), 403
     conn=get_db()
     cursor=conn.cursor(pymysql.cursors.DictCursor)
     cursor.execute("SELECT * FROM NOAI_shenhe WHERE id=%s",(id,))
@@ -2848,11 +3291,53 @@ def shenqing():
 #     return render_template('bmsq.html')
 
 
+# ============= 统一错误页 =============
+@app.errorhandler(404)
+def _handle_404(e):
+    if request.path.startswith('/api/'):
+        return jsonify({'success': False, 'error': '接口不存在'}), 404
+    return render_template('404.html'), 404
+
+
+@app.errorhandler(500)
+def _handle_500(e):
+    logger.error(f"未捕获异常: {request.method} {request.path}")
+    if request.path.startswith('/api/'):
+        return jsonify({'success': False, 'error': '服务内部错误，请稍后重试'}), 500
+    return render_template('500.html'), 500
+
+
+# ============= 健康检查 =============
+@app.route('/healthz')
+def healthz():
+    """轻量健康检查：连库失败时返回 503，便于判断"到底哪一层没起来"。"""
+    db_ok = get_db() is not None
+    return jsonify({
+        'status': 'ok' if db_ok else 'degraded',
+        'db': db_ok,
+        'ai_auditor': video_auditor is not None,
+        'recommender': recommender is not None,
+        'base_dir': app.root_path,
+        'upload_dir': app.config['UPLOAD_DIR'],
+    }), (200 if db_ok else 503)
+
+
 # ============= 启动前创建表 =============
+# 修复：原实现任一步失败都会让进程直接崩（数据库没起来 = 网站起不来）。
+# 现在每一步独立容错，缺失时降级运行，状态由 /healthz 暴露。
 with app.app_context():
-    create_users_table()
+    try:
+        create_users_table()
+    except Exception as e:
+        logger.error(f"建表失败（服务仍会启动，但相关功能不可用）: {e}")
     load_videos_to_recommender()
-    db.create_all()
+    try:
+        db.create_all()
+    except Exception as e:
+        logger.error(f"SQLAlchemy create_all 失败（可忽略，表已由原生 SQL 建好）: {e}")
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    _host = app.config.get('HOST', '127.0.0.1')
+    _port = app.config.get('PORT', 5000)
+    print(f"启动服务： http://{_host}:{_port}   （健康检查 /healthz）")
+    app.run(host=_host, port=_port, debug=app.config.get('DEBUG', False))

@@ -1,0 +1,4 @@
+# MCP Server 依赖（可选）
+# 不装也能运行网站，只是无法把审核能力对外暴露成 MCP 工具。
+# 安装：.venv\Scripts\python.exe -m pip install -r requirements-mcp.txt
+mcp>=1.0.0

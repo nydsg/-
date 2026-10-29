@@ -1,0 +1,43 @@
+# 可选 AI 审核依赖（不装也能跑，只是审核能力降级）
+# Python 3.11
+#
+# ============================================================
+#  推荐路径：只上 OCR（占用约 300MB，无需 git）
+# ============================================================
+# 1) 先装 CPU 版 torch（务必用 CPU 源，默认 PyPI 会拉 2GB+ 的 CUDA 版）
+#      pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# 2) 再装 easyocr。注意它会尝试安装 opencv-python-headless，
+#    而本项目已经用 opencv-python 提供 cv2，两者会争抢同一个 cv2.pyd。
+#    若安装时报 WinError 5（文件被占用），先停掉正在运行的服务，然后：
+#      pip install --no-deps easyocr
+#      pip install scikit-image ninja imageio
+# 3) 首次调用会下载约 100MB 的识别模型到 ~/.EasyOCR
+#
+# 装完验证：python tests/test_vision_tools.py
+#
+# ============================================================
+#  完整路径：再加 CLIP 视觉审核（需要本机有 git）
+# ============================================================
+# 先确认 `git --version` 可用（本机默认可能没装 git），然后：
+#      pip install git+https://github.com/openai/CLIP.git ftfy regex
+#
+# 若不想装 git，可改用 open_clip_torch（纯 pip 可装），
+# 但需要把 app/ai/tools.py 里的 `import clip` 换成 `import open_clip`
+# 并相应调整 clip.load(...) 的调用，属于代码改动。
+# ============================================================
+
+# --- OCR 文字识别 ---
+easyocr>=1.7
+# easyocr 的间接依赖（--no-deps 安装时需要手动补）
+scikit-image>=0.20
+ninja
+imageio
+
+# --- 视觉审核（可选，需先装 CPU 版 torch）---
+torch>=2.0
+torchvision>=0.15
+
+# --- CLIP（需要 git；不想装 git 就注释掉本节）---
+# git+https://github.com/openai/CLIP.git
+# ftfy>=6.1
+# regex>=2023.1.1

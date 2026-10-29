@@ -42,6 +42,18 @@ rengong.addEventListener('click', async() => {
     }
 })
 
+// HTML转义（防XSS）
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str).replace(/[&<>"']/g, function(m) {
+        if (m === '&') return '&amp;';
+        if (m === '<') return '&lt;';
+        if (m === '>') return '&gt;';
+        if (m === '"') return '&quot;';
+        return '&#39;';
+    });
+}
+
 // 加载审核状态
 function loadVideoStatus() {
     const container = document.getElementById('statusContainer');
@@ -80,9 +92,9 @@ function displayStatus(records) {
         
         html += `
             <div class="status-item" style="border:1px solid #ddd; padding:15px; margin-bottom:10px; border-radius:8px;">
-                <p><strong>视频:</strong> ${videoName}</p>
-                <p><strong>状态:</strong> <span style="color: ${status.color};">${status.text}</span></p>
-                <p><strong>原因:</strong> ${record.reason || '—'}</p>
+                <p><strong>视频:</strong> ${escapeHtml(videoName)}</p>
+                <p><strong>状态:</strong> <span style="color: ${status.color};">${escapeHtml(status.text)}</span></p>
+                <p><strong>原因:</strong> ${escapeHtml(record.reason || '—')}</p>
                 <p><strong>上传时间:</strong> ${record.created_at || '—'}</p>
                 ${record.status === 'rejected' ? 
                     `<button onclick="confirmDelete(${record.id})" style="background:#f44336; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer;">确认并删除</button>` : ''}

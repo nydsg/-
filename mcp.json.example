@@ -1,0 +1,14 @@
+{
+  "_comment": "把本文件内容合并到你的 MCP 客户端配置里即可。路径请按实际位置修改。",
+  "mcpServers": {
+    "campus-content-audit": {
+      "command": "C:\\Users\\联想\\Desktop\\xiangmu1\\.venv\\Scripts\\python.exe",
+      "args": [
+        "C:\\Users\\联想\\Desktop\\xiangmu1\\mcp_server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    }
+  }
+}

@@ -38,7 +38,11 @@ class VideoContentAuditor:
     
     def __init__(self):
         """初始化所有模型"""
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # 修复：原先无条件调用 torch.cuda.is_available()，未装 torch 时这里是
+        # NameError（不是 ImportError），会击穿模块顶部的导入兜底。
+        self.device = "cuda" if (CLIP_AVAILABLE and torch.cuda.is_available()) else "cpu"
+        # 是否至少有一个真实模型可用；用于让上层判断"能审"还是"只能走人工"
+        self.available = bool(CLIP_AVAILABLE or OCR_AVAILABLE)
         self.clip_model = None
         self.clip_preprocess = None
         self.ocr_reader = None

@@ -23,13 +23,20 @@ function saveToLocal() {
 
 // HTML转义
 function escapeHtml(str) {
-  if (!str) return '';
-  return str.replace(/[&<>]/g, function(m) {
+  if (str === null || str === undefined) return '';
+  return String(str).replace(/[&<>"']/g, function(m) {
     if (m === '&') return '&amp;';
     if (m === '<') return '&lt;';
     if (m === '>') return '&gt;';
-    return m;
+    if (m === '"') return '&quot;';
+    return '&#39;';
   });
+}
+
+// 仅允许站内路径或 http(s) 链接，阻止 javascript: 等危险协议
+function safeUrl(url) {
+  if (!url) return '';
+  return /^(https?:\/\/|\/)/i.test(String(url)) ? String(url) : '';
 }
 
 // 从后端加载收藏夹内的视频
@@ -67,7 +74,7 @@ function renderVideosFromData(videos, folderName) {
     html += `
       <div class="video-card" onclick="location.href='/video?id=${v.video_id}'">
         <div class="video-cover">
-          <img src="${v.cover}" alt="封面">
+          <img src="${escapeHtml(safeUrl(v.cover))}" alt="封面">
           <span class="duration">${escapeHtml(v.duration || '--:--')}</span>
           <span class="video-stats">📊 ${escapeHtml(v.stats || '0')}</span>
         </div>
